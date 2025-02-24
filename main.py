@@ -5,7 +5,7 @@ import hou
 from PySide2 import QtWidgets, QtGui, QtCore
 
 # HDRI storage location
-HDRI_STORAGE_FOLDER = "/media/jobs/3Dlibrary/HDRI/LOADER"  # Change to your desired storage location
+HDRI_STORAGE_FOLDER = "/media/jobs/3Dlibrary/HDRI/LOADER"
 DB_PATH = os.path.join(HDRI_STORAGE_FOLDER, "hdri_database.db")
 
 def initialize_database():
@@ -45,12 +45,12 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
     def load_hdri_images(self):
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT file_path, preview_path, name FROM hdri")
+        cursor.execute("SELECT id, file_path, preview_path, name FROM hdri")
         hdri_entries = cursor.fetchall()
         conn.close()
         
         row, col = 0, 0
-        for file_path, preview_path, name in hdri_entries:
+        for id, file_path, preview_path, name in hdri_entries:
             widget = self.create_thumbnail_widget(file_path, preview_path, name)
             self.grid_layout.addWidget(widget, row, col)
             
@@ -67,6 +67,10 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         btn.setFixedSize(150, 150)
         
         pixmap = QtGui.QPixmap(preview_path)
+        if pixmap.isNull():
+            pixmap = QtGui.QPixmap(150, 150)
+            pixmap.fill(QtGui.QColor("gray"))
+        
         icon = QtGui.QIcon(pixmap)
         btn.setIcon(icon)
         btn.setIconSize(QtCore.QSize(150, 150))
@@ -97,30 +101,37 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
             if not ok or not text:
                 return
             
-            unique_folder = os.path.join(HDRI_STORAGE_FOLDER, text)
-            os.makedirs(unique_folder, exist_ok=True)
-            new_file_path = os.path.join(unique_folder, os.path.basename(file_path))
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO hdri (file_path, preview_path, name) VALUES (?, ?, ?)", ("", "", text))
+            conn.commit()
+            cursor.execute("SELECT last_insert_rowid()")
+            id = cursor.fetchone()[0]
+            conn.close()
+            
+            folder_name = f"{id:05d}_{text}"
+            hdri_folder = os.path.join(HDRI_STORAGE_FOLDER, folder_name)
+            os.makedirs(hdri_folder, exist_ok=True)
+            
+            new_file_path = os.path.join(hdri_folder, os.path.basename(file_path))
             shutil.copy(file_path, new_file_path)
             
-            preview_path = os.path.join(unique_folder, "preview.jpg")
-            self.generate_preview(file_path, preview_path)
+            preview_path = os.path.join(hdri_folder, "preview.jpg")
+            self.generate_preview(new_file_path, preview_path)
             
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
-            cursor.execute("INSERT INTO hdri (file_path, preview_path, name) VALUES (?, ?, ?)", (new_file_path, preview_path, text))
+            cursor.execute("UPDATE hdri SET file_path = ?, preview_path = ? WHERE id = ?", (new_file_path, preview_path, id))
             conn.commit()
             conn.close()
             
             self.load_hdri_images()
     
     def generate_preview(self, img_path, preview_path):
-        pixmap = QtGui.QPixmap(img_path)
-        if pixmap.isNull():
-            print(f"Failed to load image for preview: {img_path}")
-            return
-        
-        thumbnail = pixmap.scaled(150, 150, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-        thumbnail.save(preview_path, "JPG")
+        try:
+            hou.image.saveFrameToFile(img_path, preview_path, 0, 150, 150)
+        except Exception as e:
+            print(f"Error generating preview for {img_path}: {e}")
 
 
 def launch_hdri_loader():
