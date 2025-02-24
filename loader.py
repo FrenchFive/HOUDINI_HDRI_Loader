@@ -7,8 +7,23 @@ import numpy as np
 from PySide2 import QtWidgets, QtGui, QtCore
 from PIL import Image
 
-# HDRI storage location
-HDRI_STORAGE_FOLDER = "/media/jobs/3Dlibrary/HDRI/LOADER"
+#check if path.txt exists
+if not os.path.exists("path.txt"):
+    #Create a Houdini Folder Selector dialog
+    folder_dialog = QtWidgets.QFileDialog()
+    folder_dialog.setFileMode(QtWidgets.QFileDialog.Directory)
+    folder_dialog.setOption(QtWidgets.QFileDialog.ShowDirsOnly)
+    folder_dialog.setWindowTitle("Select HDRI Storage Folder")
+    folder_dialog.exec_()
+    HDRI_STORAGE_FOLDER = folder_dialog.selectedFiles()[0]
+    with open("path.txt", "w") as f:
+        f.write(HDRI_STORAGE_FOLDER)
+else:
+    with open("path.txt", "r") as f:
+        HDRI_STORAGE_FOLDER = f.read()
+
+
+print(HDRI_STORAGE_FOLDER)
 DB_PATH = os.path.join(HDRI_STORAGE_FOLDER, "hdri_database.db")
 
 def initialize_database():
