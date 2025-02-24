@@ -100,9 +100,22 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         initialize_database()
         self.layout = QtWidgets.QVBoxLayout()
         self.setLayout(self.layout)
+        
+        # -- Search Bar Section --
+        self.search_layout = QtWidgets.QHBoxLayout()
+        self.search_bar = QtWidgets.QLineEdit()
+        self.search_bar.setPlaceholderText("Search HDRI...")
+        # Update grid on every change in the search bar
+        self.search_bar.textChanged.connect(self.search_hdri)
+        self.search_layout.addWidget(self.search_bar)
+        self.layout.addLayout(self.search_layout)
+        
+        # -- Add HDRI Button --
         self.add_button = QtWidgets.QPushButton("Add HDRI")
         self.add_button.clicked.connect(self.add_hdri)
         self.layout.addWidget(self.add_button)
+        
+        # -- Scrollable Grid Section --
         self.scroll_area = QtWidgets.QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_widget = QtWidgets.QWidget()
@@ -110,24 +123,32 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         self.scroll_widget.setLayout(self.wrap_layout)
         self.scroll_area.setWidget(self.scroll_widget)
         self.layout.addWidget(self.scroll_area)
+        
         self.load_hdri_images()
     
-    def load_hdri_images(self):
+    def load_hdri_images(self, search_text=""):
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT id, file_path, preview_path, name FROM hdri")
+        if search_text:
+            cursor.execute("SELECT id, file_path, preview_path, name FROM hdri WHERE name LIKE ?", (f"%{search_text}%",))
+        else:
+            cursor.execute("SELECT id, file_path, preview_path, name FROM hdri")
         hdri_entries = cursor.fetchall()
         conn.close()
         
-        # Clear existing widgets
+        # Clear existing widgets from the grid
         for i in reversed(range(self.wrap_layout.count())):
             widget = self.wrap_layout.takeAt(i).widget()
             if widget:
                 widget.deleteLater()
         
-        # Create thumbnail widget for each HDRI entry
+        # Create and add a thumbnail widget for each HDRI entry
         for id, file_path, preview_path, name in hdri_entries:
             self.wrap_layout.addWidget(self.create_thumbnail_widget(id, file_path, preview_path, name))
+    
+    def search_hdri(self):
+        search_text = self.search_bar.text().strip()
+        self.load_hdri_images(search_text)
     
     def create_thumbnail_widget(self, id, img_path, preview_path, name):
         widget = QtWidgets.QWidget()
@@ -221,7 +242,7 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
             conn.close()
 
             self.load_hdri_images()
-
+    
     def delete_hdri(self, id, hdri_path):
         # Confirm deletion with the user
         reply = QtWidgets.QMessageBox.question(
