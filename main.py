@@ -3,6 +3,7 @@ import shutil
 import sqlite3
 import hou
 from PySide2 import QtWidgets, QtGui, QtCore
+from PIL import Image
 
 # HDRI storage location
 HDRI_STORAGE_FOLDER = "/media/jobs/3Dlibrary/HDRI/LOADER"
@@ -22,24 +23,76 @@ def initialize_database():
     conn.commit()
     conn.close()
 
+class QWrapLayout(QtWidgets.QLayout):
+    def __init__(self, parent=None, margin=0, spacing=-1):
+        super(QWrapLayout, self).__init__(parent)
+        if parent is not None:
+            self.setContentsMargins(margin, margin, margin, margin)
+        self.setSpacing(spacing)
+        self.itemList = []
+
+    def addItem(self, item):
+        self.itemList.append(item)
+
+    def count(self):
+        return len(self.itemList)
+
+    def itemAt(self, index):
+        return self.itemList[index] if 0 <= index < len(self.itemList) else None
+
+    def takeAt(self, index):
+        return self.itemList.pop(index) if 0 <= index < len(self.itemList) else None
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self.doLayout(QtCore.QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect):
+        super(QWrapLayout, self).setGeometry(rect)
+        self.doLayout(rect, False)
+
+    def sizeHint(self):
+        return QtCore.QSize(400, 300)
+
+    def minimumSize(self):
+        return QtCore.QSize(200, 200)
+
+    def doLayout(self, rect, testOnly):
+        x, y, lineHeight = rect.x(), rect.y(), 0
+        for item in self.itemList:
+            spaceX, spaceY = self.spacing(), self.spacing()
+            nextX = x + item.sizeHint().width() + spaceX
+            if nextX - spaceX > rect.right() and lineHeight > 0:
+                x = rect.x()
+                y += lineHeight + spaceY
+                nextX = x + item.sizeHint().width() + spaceX
+                lineHeight = 0
+            if not testOnly:
+                item.setGeometry(QtCore.QRect(QtCore.QPoint(x, y), item.sizeHint()))
+            x = nextX
+            lineHeight = max(lineHeight, item.sizeHint().height())
+        return y + lineHeight - rect.y()
+
 class HDRIPreviewLoader(QtWidgets.QWidget):
     def __init__(self):
         super(HDRIPreviewLoader, self).__init__()
         self.setWindowTitle("HDRI Preview Loader")
         self.setGeometry(100, 100, 800, 600)
-        
         initialize_database()
-        
         self.layout = QtWidgets.QVBoxLayout()
         self.setLayout(self.layout)
-        
         self.add_button = QtWidgets.QPushButton("Add HDRI")
         self.add_button.clicked.connect(self.add_hdri)
         self.layout.addWidget(self.add_button)
-        
-        self.grid_layout = QtWidgets.QGridLayout()
-        self.layout.addLayout(self.grid_layout)
-        
+        self.scroll_area = QtWidgets.QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_widget = QtWidgets.QWidget()
+        self.wrap_layout = QWrapLayout(self.scroll_widget)
+        self.scroll_widget.setLayout(self.wrap_layout)
+        self.scroll_area.setWidget(self.scroll_widget)
+        self.layout.addWidget(self.scroll_area)
         self.load_hdri_images()
     
     def load_hdri_images(self):
@@ -49,15 +102,11 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         hdri_entries = cursor.fetchall()
         conn.close()
         
-        row, col = 0, 0
+        for i in reversed(range(self.wrap_layout.count())):
+            self.wrap_layout.takeAt(i).widget().deleteLater()
+        
         for id, file_path, preview_path, name in hdri_entries:
-            widget = self.create_thumbnail_widget(file_path, preview_path, name)
-            self.grid_layout.addWidget(widget, row, col)
-            
-            col += 1
-            if col >= 4:  # Adjust for a 4-column layout
-                col = 0
-                row += 1
+            self.wrap_layout.addWidget(self.create_thumbnail_widget(file_path, preview_path, name))
     
     def create_thumbnail_widget(self, img_path, preview_path, name):
         widget = QtWidgets.QWidget()
@@ -68,13 +117,10 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         
         pixmap = QtGui.QPixmap(preview_path)
         if pixmap.isNull():
-            pixmap = QtGui.QPixmap(150, 150)
             pixmap.fill(QtGui.QColor("gray"))
         
-        icon = QtGui.QIcon(pixmap)
-        btn.setIcon(icon)
+        btn.setIcon(QtGui.QIcon(pixmap))
         btn.setIconSize(QtCore.QSize(150, 150))
-        
         btn.clicked.connect(lambda: self.apply_hdri(img_path))
         
         label = QtWidgets.QLabel(name)
@@ -83,24 +129,27 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         layout.addWidget(btn)
         layout.addWidget(label)
         widget.setLayout(layout)
-        
         return widget
     
-    def apply_hdri(self, img_path):
-        env_light = hou.node("/obj").createNode("envlight")
-        env_light.parm("env_map").set(img_path)
-        print(f"Applied HDRI: {img_path}")
-    
+    def generate_preview(self, img_path, preview_path):
+        try:
+            with Image.open(img_path) as img:
+                img = img.convert("RGB")
+                img.thumbnail((150, 150))
+                img.save(preview_path, "JPEG")
+        except Exception as e:
+            print(f"Error generating preview for {img_path}: {e}")
+
     def add_hdri(self):
         file_dialog = QtWidgets.QFileDialog()
-        file_path, _ = file_dialog.getOpenFileName(self, "Select HDRI", "", "HDRI Files (*.hdr *.exr)")
+        file_path, _ = file_dialog.getOpenFileName(self, "Select HDRI", "", "HDRI Files (*.hdr *.exr *.png *.jpg)")
         
         if file_path:
             file_name = os.path.splitext(os.path.basename(file_path))[0]
             text, ok = QtWidgets.QInputDialog.getText(self, "Enter HDRI Name", "Name:", text=file_name)
             if not ok or not text:
                 return
-            
+
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             cursor.execute("INSERT INTO hdri (file_path, preview_path, name) VALUES (?, ?, ?)", ("", "", text))
@@ -108,31 +157,24 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
             cursor.execute("SELECT last_insert_rowid()")
             id = cursor.fetchone()[0]
             conn.close()
-            
+
             folder_name = f"{id:05d}_{text}"
             hdri_folder = os.path.join(HDRI_STORAGE_FOLDER, folder_name)
             os.makedirs(hdri_folder, exist_ok=True)
-            
+
             new_file_path = os.path.join(hdri_folder, os.path.basename(file_path))
             shutil.copy(file_path, new_file_path)
-            
+
             preview_path = os.path.join(hdri_folder, "preview.jpg")
             self.generate_preview(new_file_path, preview_path)
-            
+
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             cursor.execute("UPDATE hdri SET file_path = ?, preview_path = ? WHERE id = ?", (new_file_path, preview_path, id))
             conn.commit()
             conn.close()
-            
-            self.load_hdri_images()
-    
-    def generate_preview(self, img_path, preview_path):
-        try:
-            hou.image.saveFrameToFile(img_path, preview_path, 0, 150, 150)
-        except Exception as e:
-            print(f"Error generating preview for {img_path}: {e}")
 
+            self.load_hdri_images()
 
 def launch_hdri_loader():
     global hdr_loader
