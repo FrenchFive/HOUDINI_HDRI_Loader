@@ -233,20 +233,14 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
             # Assign the HDRI to the environment light
             env_light.parm("env_map").set(hdri_path)
     
-            # Move the light to a good position (optional)
-            env_light.parmTuple("t").set((0, 5, 0))
-    
-            # Set intensity if needed
-            env_light.parm("light_intensity").set(1.5)
-    
-            # Make sure the light is visible in the viewport
-            env_light.setDisplayFlag(True)
-            env_light.setRenderFlag(True)
-    
             print(f"HDRI applied: {hdri_path}")
+    
+            # Close the window after applying the HDRI
+            self.close()
     
         except Exception as e:
             print(f"Error applying HDRI: {e}")
+
 
 
 def launch_hdri_loader():
