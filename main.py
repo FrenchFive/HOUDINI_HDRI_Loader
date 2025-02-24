@@ -2,6 +2,8 @@ import os
 import shutil
 import sqlite3
 import hou
+import OpenImageIO as oiio
+import numpy as np
 from PySide2 import QtWidgets, QtGui, QtCore
 from PIL import Image
 
@@ -131,14 +133,53 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         widget.setLayout(layout)
         return widget
     
-    def generate_preview(self, img_path, preview_path):
+    def generate_preview(self, input_path, output_path):
+        brightness_factor=2.0
+        gamma=0.8
+        size=(200, 200)
         try:
-            with Image.open(img_path) as img:
-                img = img.convert("RGB")
-                img.thumbnail((150, 150))
-                img.save(preview_path, "JPEG")
+            ext = os.path.splitext(input_path)[1].lower()
+    
+            if ext in [".exr", ".hdr"]:  # Handle HDR and EXR using OpenImageIO
+                input_image = oiio.ImageInput.open(input_path)
+                if not input_image:
+                    raise ValueError(f"Could not open {input_path}")
+    
+                spec = input_image.spec()
+                image_data = input_image.read_image("float")  # Read as float32
+                input_image.close()
+    
+                if image_data is None:
+                    raise ValueError("Failed to read image data.")
+    
+                # Reshape to match (height, width, channels)
+                image = np.array(image_data).reshape(spec.height, spec.width, spec.nchannels)
+    
+                # Normalize and remove alpha channel if present
+                if spec.nchannels > 3:
+                    image = image[:, :, :3]  # Keep RGB only
+    
+                # Apply brightness factor
+                image = image * brightness_factor
+    
+                # Apply gamma correction
+                image = np.power(image, gamma)
+    
+                # Normalize to 8-bit
+                image = np.clip(image * 255, 0, 255).astype(np.uint8)
+    
+                # Convert to PIL image for resizing
+                img = Image.fromarray(image)
+    
+            else:  # Handle PNG, JPG, and other standard formats
+                img = Image.open(input_path).convert("RGB")
+    
+            img.thumbnail(size, Image.ANTIALIAS)
+            img.save(output_path, "JPEG")
+            print(f"Preview generated: {output_path}")
+
         except Exception as e:
-            print(f"Error generating preview for {img_path}: {e}")
+                print(f"Error generating preview for {input_path}: {e}")
 
     def add_hdri(self):
         file_dialog = QtWidgets.QFileDialog()
@@ -175,6 +216,38 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
             conn.close()
 
             self.load_hdri_images()
+
+    def apply_hdri(self, hdri_path):
+        try:
+            # Get the Houdini root object
+            obj = hou.node("/obj")
+    
+            # Check if an environment light already exists
+            light_name = "hdri_env_light"
+            env_light = obj.node(light_name)
+    
+            if env_light is None:
+                # Create a new environment light
+                env_light = obj.createNode("envlight", light_name)
+    
+            # Assign the HDRI to the environment light
+            env_light.parm("env_map").set(hdri_path)
+    
+            # Move the light to a good position (optional)
+            env_light.parmTuple("t").set((0, 5, 0))
+    
+            # Set intensity if needed
+            env_light.parm("light_intensity").set(1.5)
+    
+            # Make sure the light is visible in the viewport
+            env_light.setDisplayFlag(True)
+            env_light.setRenderFlag(True)
+    
+            print(f"HDRI applied: {hdri_path}")
+    
+        except Exception as e:
+            print(f"Error applying HDRI: {e}")
+
 
 def launch_hdri_loader():
     global hdr_loader
