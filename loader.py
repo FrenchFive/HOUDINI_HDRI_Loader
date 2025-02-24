@@ -119,87 +119,77 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         hdri_entries = cursor.fetchall()
         conn.close()
         
+        # Clear existing widgets
         for i in reversed(range(self.wrap_layout.count())):
-            self.wrap_layout.takeAt(i).widget().deleteLater()
+            widget = self.wrap_layout.takeAt(i).widget()
+            if widget:
+                widget.deleteLater()
         
+        # Create thumbnail widget for each HDRI entry
         for id, file_path, preview_path, name in hdri_entries:
-            self.wrap_layout.addWidget(self.create_thumbnail_widget(file_path, preview_path, name))
+            self.wrap_layout.addWidget(self.create_thumbnail_widget(id, file_path, preview_path, name))
     
-    def create_thumbnail_widget(self, img_path, preview_path, name):
+    def create_thumbnail_widget(self, id, img_path, preview_path, name):
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout()
         
+        # HDRI apply button with thumbnail image
         btn = QtWidgets.QPushButton()
         btn.setFixedSize(150, 150)
-        
         pixmap = QtGui.QPixmap(preview_path)
         if pixmap.isNull():
             pixmap.fill(QtGui.QColor("gray"))
-        
         btn.setIcon(QtGui.QIcon(pixmap))
         btn.setIconSize(QtCore.QSize(150, 150))
         btn.clicked.connect(lambda: self.apply_hdri(img_path))
+        layout.addWidget(btn)
         
+        # Label displaying the HDRI name
         label = QtWidgets.QLabel(name)
         label.setAlignment(QtCore.Qt.AlignCenter)
-        
-        layout.addWidget(btn)
         layout.addWidget(label)
+        
+        # Delete button to remove the HDRI
+        delete_btn = QtWidgets.QPushButton("Delete")
+        delete_btn.clicked.connect(lambda: self.delete_hdri(id, img_path))
+        layout.addWidget(delete_btn)
+        
         widget.setLayout(layout)
         return widget
     
     def generate_preview(self, input_path, output_path):
-        brightness_factor=2.0
-        gamma=0.8
-        size=(200, 200)
+        brightness_factor = 2.0
+        gamma = 0.8
+        size = (200, 200)
         try:
             ext = os.path.splitext(input_path)[1].lower()
-    
             if ext in [".exr", ".hdr"]:  # Handle HDR and EXR using OpenImageIO
                 input_image = oiio.ImageInput.open(input_path)
                 if not input_image:
                     raise ValueError(f"Could not open {input_path}")
-    
                 spec = input_image.spec()
                 image_data = input_image.read_image("float")  # Read as float32
                 input_image.close()
-    
                 if image_data is None:
                     raise ValueError("Failed to read image data.")
-    
-                # Reshape to match (height, width, channels)
                 image = np.array(image_data).reshape(spec.height, spec.width, spec.nchannels)
-    
-                # Normalize and remove alpha channel if present
                 if spec.nchannels > 3:
                     image = image[:, :, :3]  # Keep RGB only
-    
-                # Apply brightness factor
                 image = image * brightness_factor
-    
-                # Apply gamma correction
                 image = np.power(image, gamma)
-    
-                # Normalize to 8-bit
                 image = np.clip(image * 255, 0, 255).astype(np.uint8)
-    
-                # Convert to PIL image for resizing
                 img = Image.fromarray(image)
-    
             else:  # Handle PNG, JPG, and other standard formats
                 img = Image.open(input_path).convert("RGB")
-    
             img.thumbnail(size, Image.ANTIALIAS)
             img.save(output_path, "JPEG")
             print(f"Preview generated: {output_path}")
-
         except Exception as e:
-                print(f"Error generating preview for {input_path}: {e}")
+            print(f"Error generating preview for {input_path}: {e}")
 
     def add_hdri(self):
         file_dialog = QtWidgets.QFileDialog()
         file_path, _ = file_dialog.getOpenFileName(self, "Select HDRI", "", "HDRI Files (*.hdr *.exr *.png *.jpg)")
-        
         if file_path:
             file_name = os.path.splitext(os.path.basename(file_path))[0]
             text, ok = QtWidgets.QInputDialog.getText(self, "Enter HDRI Name", "Name:", text=file_name)
@@ -232,31 +222,47 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
 
             self.load_hdri_images()
 
+    def delete_hdri(self, id, hdri_path):
+        # Confirm deletion with the user
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Delete HDRI",
+            "Are you sure you want to delete this HDRI?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+        )
+        if reply == QtWidgets.QMessageBox.Yes:
+            try:
+                # Determine the folder to delete from the HDRI file path
+                folder_to_delete = os.path.dirname(hdri_path)
+                if os.path.exists(folder_to_delete):
+                    shutil.rmtree(folder_to_delete)
+                # Remove the database entry
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM hdri WHERE id = ?", (id,))
+                conn.commit()
+                conn.close()
+                self.load_hdri_images()
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(self, "Error", f"Error deleting HDRI: {e}")
+
     def apply_hdri(self, hdri_path):
         try:
             # Get the Houdini root object
             obj = hou.node("/obj")
-    
             # Check if an environment light already exists
             light_name = "hdri_env_light"
             env_light = obj.node(light_name)
-    
             if env_light is None:
                 # Create a new environment light
                 env_light = obj.createNode("envlight", light_name)
-    
             # Assign the HDRI to the environment light
             env_light.parm("env_map").set(hdri_path)
-    
             print(f"HDRI applied: {hdri_path}")
-    
             # Close the window after applying the HDRI
             self.close()
-    
         except Exception as e:
             print(f"Error applying HDRI: {e}")
-
-
 
 def launch_hdri_loader():
     global hdr_loader
