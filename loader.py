@@ -384,6 +384,8 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
     def create_thumbnail_widget(self, record):
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout()
+        
+        # Create the HDRI preview button.
         btn = QtWidgets.QPushButton()
         btn.setFixedSize(150, 150)
         pixmap = QtGui.QPixmap(record[2])
@@ -394,17 +396,34 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         btn.setIconSize(QtCore.QSize(150, 150))
         btn.clicked.connect(lambda: self.apply_hdri(record[1]))
         layout.addWidget(btn)
-        label = QtWidgets.QLabel(f"{record[3]}\n({record[4][:10]})")
-        label.setAlignment(QtCore.Qt.AlignCenter)
-        layout.addWidget(label)
-        update_btn = QtWidgets.QPushButton("Update")
-        update_btn.clicked.connect(lambda: self.update_hdri_info(record))
-        layout.addWidget(update_btn)
-        delete_btn = QtWidgets.QPushButton("Delete")
-        delete_btn.clicked.connect(lambda: self.delete_hdri(record[0], record[1]))
-        layout.addWidget(delete_btn)
+        
+        # Create a horizontal layout for the HDRI name and the options button.
+        name_layout = QtWidgets.QHBoxLayout()
+        
+        # Display only the HDRI name (date removed).
+        name_label = QtWidgets.QLabel(record[3])
+        name_layout.addWidget(name_label)
+        
+        # Create a three-dotted button using QToolButton.
+        options_button = QtWidgets.QToolButton()
+        options_button.setText("...")
+        options_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        
+        # Create a menu with "Update" and "Delete" actions.
+        menu = QtWidgets.QMenu(options_button)
+        update_action = menu.addAction("Update")
+        delete_action = menu.addAction("Delete")
+        
+        update_action.triggered.connect(lambda: self.update_hdri_info(record))
+        delete_action.triggered.connect(lambda: self.delete_hdri(record[0], record[1]))
+        
+        options_button.setMenu(menu)
+        name_layout.addWidget(options_button)
+        
+        layout.addLayout(name_layout)
         widget.setLayout(layout)
         return widget
+
 
     def update_hdri_info(self, record):
         dialog = HDRIInfoDialog(record, self)
