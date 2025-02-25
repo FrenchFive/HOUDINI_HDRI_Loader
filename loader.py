@@ -2,6 +2,7 @@ import os
 import shutil
 import sqlite3
 import datetime
+import hashlib  # if needed later for other purposes
 from functools import partial
 
 import hou
@@ -27,10 +28,60 @@ else:
 print(HDRI_STORAGE_FOLDER)
 DB_PATH = os.path.join(HDRI_STORAGE_FOLDER, "hdri_database.db")
 
+def compute_image_hash(file_path, hash_size=16):
+    """
+    Compute a perceptual hash (average hash) that is invariant to image size.
+    For regular image files PIL is used.
+    For HDR/EXR files, OpenImageIO is used to read the image data and convert
+    it to an 8-bit grayscale image.
+    """
+    try:
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in [".exr", ".hdr"]:
+            # Use OpenImageIO to read HDR/EXR file
+            input_image = oiio.ImageInput.open(file_path)
+            if not input_image:
+                raise ValueError(f"Could not open {file_path}")
+            spec = input_image.spec()
+            image_data = input_image.read_image("float")
+            input_image.close()
+            if image_data is None:
+                raise ValueError("Failed to read image data.")
+            # Reshape and convert to numpy array
+            image = np.array(image_data).reshape(spec.height, spec.width, spec.nchannels)
+            # Convert to grayscale: if at least 3 channels exist use luminance coefficients
+            if spec.nchannels >= 3:
+                gray = 0.299 * image[..., 0] + 0.587 * image[..., 1] + 0.114 * image[..., 2]
+            else:
+                gray = image[..., 0]
+            # Normalize the grayscale image to the 0-255 range
+            max_val = np.max(gray)
+            if max_val > 0:
+                gray = gray / max_val * 255
+            else:
+                gray = np.zeros_like(gray)
+            gray = gray.astype(np.uint8)
+            pil_image = Image.fromarray(gray, mode="L")
+            img = pil_image
+        else:
+            # For other image types, use PIL directly.
+            img = Image.open(file_path).convert("L")
+        # Resize the image to a fixed size (16x16 by default)
+        img = img.resize((hash_size, hash_size), Image.LANCZOS)
+        pixels = list(img.getdata())
+        avg = sum(pixels) / len(pixels)
+        bits = ''.join('1' if pixel >= avg else '0' for pixel in pixels)
+        hex_hash = hex(int(bits, 2))[2:].rjust((hash_size * hash_size) // 4, '0')
+        return hex_hash
+    except Exception as e:
+        print(f"Error computing image hash: {e}")
+        return None
+
+
 def initialize_database():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # Create the hdri table with fixed columns; tag columns will be added dynamically.
+    # Create the hdri table with fixed columns and a unique hash column.
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS hdri (
@@ -38,7 +89,8 @@ def initialize_database():
             file_path TEXT NOT NULL,
             preview_path TEXT NOT NULL,
             name TEXT NOT NULL,
-            upload_date TEXT NOT NULL
+            upload_date TEXT NOT NULL,
+            hash TEXT UNIQUE
         )
         """
     )
@@ -400,7 +452,7 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         # Create a horizontal layout for the HDRI name and the options button.
         name_layout = QtWidgets.QHBoxLayout()
         
-        # Display only the HDRI name (date removed).
+        # Display only the HDRI name.
         name_label = QtWidgets.QLabel(record[3])
         name_layout.addWidget(name_label)
         
@@ -423,7 +475,6 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         layout.addLayout(name_layout)
         widget.setLayout(layout)
         return widget
-
 
     def update_hdri_info(self, record):
         dialog = HDRIInfoDialog(record, self)
@@ -465,21 +516,32 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         file_dialog = QtWidgets.QFileDialog()
         file_path, _ = file_dialog.getOpenFileName(self, "Select HDRI", "", "HDRI Files (*.hdr *.exr *.png *.jpg)")
         if file_path:
+            # Compute the perceptual hash for a 16x16 image.
+            image_hash = compute_image_hash(file_path, hash_size=16)
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM hdri WHERE hash = ?", (image_hash,))
+            result = cursor.fetchone()
+            if result:
+                QtWidgets.QMessageBox.warning(self, "Duplicate HDRI", "This image already exists in the database.")
+                conn.close()
+                return
+
             file_name = os.path.splitext(os.path.basename(file_path))[0]
             hdri_name, ok = QtWidgets.QInputDialog.getText(self, "Enter HDRI Name", "Name:", text=file_name)
             if not ok or not hdri_name:
+                conn.close()
                 return
             current_date = datetime.datetime.now().isoformat()
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO hdri (file_path, preview_path, name, upload_date) VALUES (?, ?, ?, ?)",
-                ("", "", hdri_name, current_date),
+                "INSERT INTO hdri (file_path, preview_path, name, upload_date, hash) VALUES (?, ?, ?, ?, ?)",
+                ("", "", hdri_name, current_date, image_hash),
             )
             conn.commit()
             cursor.execute("SELECT last_insert_rowid()")
             hdri_id = cursor.fetchone()[0]
             conn.close()
+
             folder_name = f"{hdri_id:05d}_{hdri_name}"
             hdri_folder = os.path.join(HDRI_STORAGE_FOLDER, folder_name)
             os.makedirs(hdri_folder, exist_ok=True)
@@ -558,7 +620,6 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
             self.close()
         except Exception as e:
             print(f"Error applying HDRI: {e}")
-
 
 def launch_hdri_loader():
     global hdr_loader
