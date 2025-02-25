@@ -165,13 +165,43 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         self.layout = QtWidgets.QVBoxLayout()
         self.setLayout(self.layout)
         
-        # -- Search Bar Section --
+        # -- Search and Filter Bar Section --
         self.search_layout = QtWidgets.QHBoxLayout()
         self.search_bar = QtWidgets.QLineEdit()
         self.search_bar.setPlaceholderText("Search HDRI...")
         self.search_bar.textChanged.connect(self.search_hdri)
         self.search_layout.addWidget(self.search_bar)
+        
+        # Filter button to toggle filter checkboxes
+        self.filter_button = QtWidgets.QPushButton("Filters")
+        self.filter_button.setCheckable(True)
+        self.filter_button.toggled.connect(self.toggle_filters)
+        self.search_layout.addWidget(self.filter_button)
         self.layout.addLayout(self.search_layout)
+        
+        # -- Filter Widget (initially hidden) --
+        self.filter_widget = QtWidgets.QWidget()
+        self.filter_layout = QtWidgets.QHBoxLayout(self.filter_widget)
+        self.filter_checkboxes = {}
+        # List of tuples: (database column, display text)
+        categories = [
+            ("cat_Outdoor", "Outdoor"),
+            ("cat_Indoor", "Indoor"),
+            ("cat_Studio", "Studio"),
+            ("cat_Nature", "Nature"),
+            ("cat_Urban", "Urban"),
+            ("cat_Sunset", "Sunset"),
+            ("cat_Night", "Night"),
+            ("cat_Day", "Day"),
+            ("cat_Dawn", "Dawn")
+        ]
+        for col, text in categories:
+            cb = QtWidgets.QCheckBox(text)
+            cb.stateChanged.connect(self.search_hdri)
+            self.filter_layout.addWidget(cb)
+            self.filter_checkboxes[col] = cb
+        self.filter_widget.setVisible(False)
+        self.layout.addWidget(self.filter_widget)
         
         # -- Add HDRI Button --
         self.add_button = QtWidgets.QPushButton("Add HDRI")
@@ -189,20 +219,40 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         
         self.load_hdri_images()
     
+    def toggle_filters(self, checked):
+        self.filter_widget.setVisible(checked)
+        self.search_hdri()
+    
     def load_hdri_images(self, search_text=""):
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        query = """
+        base_query = """
             SELECT id, file_path, preview_path, name,
                    cat_Outdoor, cat_Indoor, cat_Studio, cat_Nature,
                    cat_Urban, cat_Sunset, cat_Night, cat_Day, cat_Dawn
             FROM hdri
         """
+        conditions = []
+        params = []
         if search_text:
-            query += " WHERE name LIKE ?"
-            cursor.execute(query, (f"%{search_text}%",))
+            conditions.append("name LIKE ?")
+            params.append(f"%{search_text}%")
+        
+        # Build filter conditions (using OR logic among checked filters)
+        filter_conds = []
+        for col, checkbox in self.filter_checkboxes.items():
+            if checkbox.isChecked():
+                filter_conds.append(f"{col} = 1")
+        if filter_conds:
+            # If there are both search text and filter conditions, combine with AND.
+            conditions.append("(" + " OR ".join(filter_conds) + ")")
+        
+        if conditions:
+            query = base_query + " WHERE " + " AND ".join(conditions)
         else:
-            cursor.execute(query)
+            query = base_query
+        
+        cursor.execute(query, params)
         records = cursor.fetchall()
         conn.close()
         
@@ -217,6 +267,7 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
             self.wrap_layout.addWidget(self.create_thumbnail_widget(record))
     
     def search_hdri(self):
+        # Use the current text and filter settings to update the grid
         search_text = self.search_bar.text().strip()
         self.load_hdri_images(search_text)
     
