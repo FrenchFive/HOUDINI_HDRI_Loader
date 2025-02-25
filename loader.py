@@ -2,6 +2,7 @@ import os
 import shutil
 import sqlite3
 import datetime
+from functools import partial
 
 import hou
 import OpenImageIO as oiio
@@ -9,9 +10,8 @@ import numpy as np
 from PySide2 import QtWidgets, QtGui, QtCore
 from PIL import Image
 
-# Check if path.txt exists
+# Check if path.txt exists; if not, prompt the user to select a folder.
 if not os.path.exists("path.txt"):
-    # Create a Houdini Folder Selector dialog
     folder_dialog = QtWidgets.QFileDialog()
     folder_dialog.setFileMode(QtWidgets.QFileDialog.Directory)
     folder_dialog.setOption(QtWidgets.QFileDialog.ShowDirsOnly)
@@ -27,10 +27,10 @@ else:
 print(HDRI_STORAGE_FOLDER)
 DB_PATH = os.path.join(HDRI_STORAGE_FOLDER, "hdri_database.db")
 
-
 def initialize_database():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    # Create the hdri table with fixed columns; tag columns will be added dynamically.
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS hdri (
@@ -38,22 +38,63 @@ def initialize_database():
             file_path TEXT NOT NULL,
             preview_path TEXT NOT NULL,
             name TEXT NOT NULL,
-            upload_date TEXT NOT NULL,
-            cat_Outdoor BOOLEAN DEFAULT 0,
-            cat_Indoor BOOLEAN DEFAULT 0,
-            cat_Studio BOOLEAN DEFAULT 0,
-            cat_Nature BOOLEAN DEFAULT 0,
-            cat_Urban BOOLEAN DEFAULT 0,
-            cat_Sunset BOOLEAN DEFAULT 0,
-            cat_Night BOOLEAN DEFAULT 0,
-            cat_Day BOOLEAN DEFAULT 0,
-            cat_Dawn BOOLEAN DEFAULT 0
+            upload_date TEXT NOT NULL
         )
         """
     )
     conn.commit()
     conn.close()
 
+def get_tag_columns():
+    """Return a list of tag column names in the hdri table (columns starting with 'tag_')."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(hdri)")
+    cols = cursor.fetchall()  # each row: (cid, name, type, notnull, dflt_value, pk)
+    conn.close()
+    tag_cols = [col[1] for col in cols if col[1].startswith("tag_")]
+    return tag_cols
+
+def safe_tag_column(tag_name):
+    """Create a safe column name for a tag by stripping spaces and prepending 'tag_'."""
+    return "tag_" + tag_name.strip().replace(" ", "_")
+
+def drop_column_from_table(db_path, table, column_to_drop):
+    """
+    Workaround to drop a column in SQLite:
+      1. Create a temporary table with all columns except the one to drop.
+      2. Copy data.
+      3. Drop the old table.
+      4. Rename the new table.
+    """
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute(f"PRAGMA table_info({table})")
+    columns_info = cursor.fetchall()  # (cid, name, type, notnull, dflt_value, pk)
+    # Keep all columns except the one to drop.
+    new_columns = [col for col in columns_info if col[1] != column_to_drop]
+    # Build new CREATE TABLE statement.
+    col_defs = []
+    for col in new_columns:
+        name = col[1]
+        typ = col[2]
+        notnull = "NOT NULL" if col[3] else ""
+        dflt = f"DEFAULT {col[4]}" if col[4] is not None else ""
+        pk = "PRIMARY KEY" if col[5] else ""
+        parts = [name, typ, notnull, dflt, pk]
+        parts = [p for p in parts if p]
+        col_defs.append(" ".join(parts))
+    col_defs_str = ", ".join(col_defs)
+    temp_table = table + "_backup"
+    cursor.execute("BEGIN TRANSACTION;")
+    cursor.execute(f"CREATE TABLE {temp_table} ({col_defs_str});")
+    col_names = [col[1] for col in new_columns]
+    col_names_str = ", ".join(col_names)
+    cursor.execute(f"INSERT INTO {temp_table} ({col_names_str}) SELECT {col_names_str} FROM {table};")
+    cursor.execute(f"DROP TABLE {table};")
+    cursor.execute(f"ALTER TABLE {temp_table} RENAME TO {table};")
+    conn.commit()
+    conn.close()
 
 class QWrapLayout(QtWidgets.QLayout):
     def __init__(self, parent=None, margin=0, spacing=-1):
@@ -99,7 +140,6 @@ class QWrapLayout(QtWidgets.QLayout):
         x = rect.x()
         y = rect.y()
         line_height = 0
-
         for item in self.itemList:
             space_x = self.spacing()
             space_y = self.spacing()
@@ -115,58 +155,38 @@ class QWrapLayout(QtWidgets.QLayout):
             line_height = max(line_height, item.sizeHint().height())
         return y + line_height - rect.y()
 
-
 class HDRIInfoDialog(QtWidgets.QDialog):
     def __init__(self, record, parent=None):
         """
-        Record indices:
-          0: id, 1: file_path, 2: preview_path, 3: name, 4: upload_date,
-          5: cat_Outdoor, 6: cat_Indoor, 7: cat_Studio, 8: cat_Nature,
-          9: cat_Urban, 10: cat_Sunset, 11: cat_Night, 12: cat_Day, 13: cat_Dawn
+        record indices:
+          0: id, 1: file_path, 2: preview_path, 3: name, 4: upload_date
         """
         super().__init__(parent)
         self.setWindowTitle("Update HDRI Info")
+        self.hdri_id = record[0]
+        self.tag_checkboxes = {}  # Mapping from tag column name to QCheckBox
         layout = QtWidgets.QFormLayout(self)
 
         self.name_edit = QtWidgets.QLineEdit(record[3])
         layout.addRow("Name:", self.name_edit)
 
-        self.outdoor_checkbox = QtWidgets.QCheckBox("Outdoor")
-        self.outdoor_checkbox.setChecked(bool(record[5]))
-        layout.addRow(self.outdoor_checkbox)
+        # --- Tag editing section ---
+        self.tags_widget = QtWidgets.QWidget()
+        self.tags_layout = QtWidgets.QVBoxLayout(self.tags_widget)
+        self.load_tags()  # Populate self.tags_layout with checkboxes and delete buttons
+        layout.addRow("Tags:", self.tags_widget)
 
-        self.indoor_checkbox = QtWidgets.QCheckBox("Indoor")
-        self.indoor_checkbox.setChecked(bool(record[6]))
-        layout.addRow(self.indoor_checkbox)
+        # Input and button to add a new tag
+        tag_input_layout = QtWidgets.QHBoxLayout()
+        self.new_tag_edit = QtWidgets.QLineEdit()
+        self.new_tag_edit.setPlaceholderText("Enter new tag")
+        self.add_tag_button = QtWidgets.QPushButton("Add Tag")
+        self.add_tag_button.clicked.connect(self.add_new_tag)
+        tag_input_layout.addWidget(self.new_tag_edit)
+        tag_input_layout.addWidget(self.add_tag_button)
+        layout.addRow("New Tag:", tag_input_layout)
 
-        self.studio_checkbox = QtWidgets.QCheckBox("Studio")
-        self.studio_checkbox.setChecked(bool(record[7]))
-        layout.addRow(self.studio_checkbox)
-
-        self.nature_checkbox = QtWidgets.QCheckBox("Nature")
-        self.nature_checkbox.setChecked(bool(record[8]))
-        layout.addRow(self.nature_checkbox)
-
-        self.urban_checkbox = QtWidgets.QCheckBox("Urban")
-        self.urban_checkbox.setChecked(bool(record[9]))
-        layout.addRow(self.urban_checkbox)
-
-        self.sunset_checkbox = QtWidgets.QCheckBox("Sunset")
-        self.sunset_checkbox.setChecked(bool(record[10]))
-        layout.addRow(self.sunset_checkbox)
-
-        self.night_checkbox = QtWidgets.QCheckBox("Night")
-        self.night_checkbox.setChecked(bool(record[11]))
-        layout.addRow(self.night_checkbox)
-
-        self.day_checkbox = QtWidgets.QCheckBox("Day")
-        self.day_checkbox.setChecked(bool(record[12]))
-        layout.addRow(self.day_checkbox)
-
-        self.dawn_checkbox = QtWidgets.QCheckBox("Dawn")
-        self.dawn_checkbox.setChecked(bool(record[13]))
-        layout.addRow(self.dawn_checkbox)
-
+        # --- Dialog buttons ---
         self.button_box = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
         )
@@ -174,6 +194,82 @@ class HDRIInfoDialog(QtWidgets.QDialog):
         self.button_box.rejected.connect(self.reject)
         layout.addRow(self.button_box)
 
+    def load_tags(self):
+        """Clear and repopulate the tags section with checkboxes for each tag column."""
+        for i in reversed(range(self.tags_layout.count())):
+            item = self.tags_layout.takeAt(i)
+            if item.widget():
+                item.widget().deleteLater()
+        self.tag_checkboxes = {}
+        tag_cols = get_tag_columns()
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        for col in tag_cols:
+            cursor.execute(f"SELECT {col} FROM hdri WHERE id = ?", (self.hdri_id,))
+            value = cursor.fetchone()[0]
+            hlayout = QtWidgets.QHBoxLayout()
+            display_name = col[4:]  # remove the "tag_" prefix for display
+            checkbox = QtWidgets.QCheckBox(display_name)
+            checkbox.setChecked(bool(value))
+            self.tag_checkboxes[col] = checkbox
+            hlayout.addWidget(checkbox)
+            # X button to delete the tag without confirmation
+            del_btn = QtWidgets.QPushButton("X")
+            del_btn.setFixedSize(20, 20)
+            # Use functools.partial to capture the current value of col
+            del_btn.clicked.connect(partial(self.delete_tag, col))
+            hlayout.addWidget(del_btn)
+            container = QtWidgets.QWidget()
+            container.setLayout(hlayout)
+            self.tags_layout.addWidget(container)
+        conn.close()
+
+    def add_new_tag(self):
+        new_tag = self.new_tag_edit.text().strip()
+        if not new_tag:
+            return
+        col_name = safe_tag_column(new_tag)
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        try:
+            cursor.execute(f"ALTER TABLE hdri ADD COLUMN {col_name} BOOLEAN DEFAULT 0")
+            conn.commit()
+        except Exception as e:
+            print(f"Error adding tag: {e}")
+            conn.close()
+            return
+        cursor.execute(f"UPDATE hdri SET {col_name} = 1 WHERE id = ?", (self.hdri_id,))
+        conn.commit()
+        conn.close()
+        self.new_tag_edit.clear()
+        self.load_tags()
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "populate_filter_checkboxes"):
+            parent.populate_filter_checkboxes()
+
+    def delete_tag(self, col_name):
+        # Immediately drop the column without confirmation or warning.
+        try:
+            drop_column_from_table(DB_PATH, "hdri", col_name)
+        except Exception as e:
+            print(f"Error deleting tag: {e}")
+            return
+        self.load_tags()
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "populate_filter_checkboxes"):
+            parent.populate_filter_checkboxes()
+
+    def accept(self):
+        new_name = self.name_edit.text().strip()
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE hdri SET name = ? WHERE id = ?", (new_name, self.hdri_id))
+        for col, checkbox in self.tag_checkboxes.items():
+            val = 1 if checkbox.isChecked() else 0
+            cursor.execute(f"UPDATE hdri SET {col} = ? WHERE id = ?", (val, self.hdri_id))
+        conn.commit()
+        conn.close()
+        super().accept()
 
 class HDRIPreviewLoader(QtWidgets.QWidget):
     def __init__(self):
@@ -191,14 +287,10 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         self.search_bar.setPlaceholderText("Search HDRI...")
         self.search_bar.textChanged.connect(self.search_hdri)
         self.search_layout.addWidget(self.search_bar)
-
-        # Filter button to toggle filter checkboxes
         self.filter_button = QtWidgets.QPushButton("Filters")
         self.filter_button.setCheckable(True)
         self.filter_button.toggled.connect(self.toggle_filters)
         self.search_layout.addWidget(self.filter_button)
-
-        # Sorting dropdown for ordering results
         self.sort_combo = QtWidgets.QComboBox()
         self.sort_combo.addItems([
             "Alphabetical Ascending",
@@ -208,31 +300,13 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         ])
         self.sort_combo.currentIndexChanged.connect(self.search_hdri)
         self.search_layout.addWidget(self.sort_combo)
-
         self.layout.addLayout(self.search_layout)
 
         # -- Filter Widget (initially hidden) --
         self.filter_widget = QtWidgets.QWidget()
         self.filter_layout = QtWidgets.QHBoxLayout(self.filter_widget)
         self.filter_checkboxes = {}
-
-        # List of tuples: (database column, display text)
-        categories = [
-            ("cat_Outdoor", "Outdoor"),
-            ("cat_Indoor", "Indoor"),
-            ("cat_Studio", "Studio"),
-            ("cat_Nature", "Nature"),
-            ("cat_Urban", "Urban"),
-            ("cat_Sunset", "Sunset"),
-            ("cat_Night", "Night"),
-            ("cat_Day", "Day"),
-            ("cat_Dawn", "Dawn"),
-        ]
-        for col, text in categories:
-            cb = QtWidgets.QCheckBox(text)
-            cb.stateChanged.connect(self.search_hdri)
-            self.filter_layout.addWidget(cb)
-            self.filter_checkboxes[col] = cb
+        self.populate_filter_checkboxes()
         self.filter_widget.setVisible(False)
         self.layout.addWidget(self.filter_widget)
 
@@ -252,6 +326,19 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
 
         self.load_hdri_images()
 
+    def populate_filter_checkboxes(self):
+        for i in reversed(range(self.filter_layout.count())):
+            widget = self.filter_layout.takeAt(i).widget()
+            if widget:
+                widget.deleteLater()
+        self.filter_checkboxes = {}
+        for col in get_tag_columns():
+            display_name = col[4:]
+            cb = QtWidgets.QCheckBox(display_name)
+            cb.stateChanged.connect(self.search_hdri)
+            self.filter_layout.addWidget(cb)
+            self.filter_checkboxes[col] = cb
+
     def toggle_filters(self, checked):
         self.filter_widget.setVisible(checked)
         self.search_hdri()
@@ -259,144 +346,71 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
     def load_hdri_images(self, search_text=""):
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        base_query = (
-            """
-            SELECT id, file_path, preview_path, name, upload_date,
-                   cat_Outdoor, cat_Indoor, cat_Studio, cat_Nature,
-                   cat_Urban, cat_Sunset, cat_Night, cat_Day, cat_Dawn
-            FROM hdri
-            """
-        )
+        base_query = "SELECT id, file_path, preview_path, name, upload_date FROM hdri"
         conditions = []
         params = []
-
         if search_text:
             conditions.append("name LIKE ?")
             params.append(f"%{search_text}%")
-
-        # Build filter conditions (using OR logic among checked filters)
-        filter_conds = []
-        for col, checkbox in self.filter_checkboxes.items():
-            if checkbox.isChecked():
-                filter_conds.append(f"{col} = 1")
-        if filter_conds:
-            conditions.append("(" + " OR ".join(filter_conds) + ")")
-
+        for col, cb in self.filter_checkboxes.items():
+            if cb.isChecked():
+                conditions.append(f"{col} = 1")
         if conditions:
             query = base_query + " WHERE " + " AND ".join(conditions)
         else:
             query = base_query
-
-        # Append ORDER BY clause based on the sort dropdown selection
         sort_option = self.sort_combo.currentText() if hasattr(self, 'sort_combo') else "Alphabetical Ascending"
         if sort_option.startswith("Alphabetical"):
             query += " ORDER BY name "
         elif sort_option.startswith("Upload Date"):
             query += " ORDER BY upload_date "
         query += "DESC" if "Descending" in sort_option else "ASC"
-
         cursor.execute(query, params)
         records = cursor.fetchall()
         conn.close()
 
-        # Clear existing widgets from the grid
         for i in reversed(range(self.wrap_layout.count())):
             widget = self.wrap_layout.takeAt(i).widget()
             if widget:
                 widget.deleteLater()
 
-        # Create and add a thumbnail widget for each HDRI record
         for record in records:
             self.wrap_layout.addWidget(self.create_thumbnail_widget(record))
 
     def search_hdri(self):
-        # Use the current text and filter settings to update the grid
         search_text = self.search_bar.text().strip()
         self.load_hdri_images(search_text)
 
     def create_thumbnail_widget(self, record):
-        # Record indices:
-        # 0: id, 1: file_path, 2: preview_path, 3: name, 4: upload_date, 5-13: category flags
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout()
-
-        # HDRI apply button with thumbnail image
         btn = QtWidgets.QPushButton()
         btn.setFixedSize(150, 150)
         pixmap = QtGui.QPixmap(record[2])
         if pixmap.isNull():
+            pixmap = QtGui.QPixmap(150, 150)
             pixmap.fill(QtGui.QColor("gray"))
         btn.setIcon(QtGui.QIcon(pixmap))
         btn.setIconSize(QtCore.QSize(150, 150))
         btn.clicked.connect(lambda: self.apply_hdri(record[1]))
         layout.addWidget(btn)
-
-        # Label displaying the HDRI name and upload date
         label = QtWidgets.QLabel(f"{record[3]}\n({record[4][:10]})")
         label.setAlignment(QtCore.Qt.AlignCenter)
         layout.addWidget(label)
-
-        # Update button to change info
         update_btn = QtWidgets.QPushButton("Update")
         update_btn.clicked.connect(lambda: self.update_hdri_info(record))
         layout.addWidget(update_btn)
-
-        # Delete button to remove the HDRI
         delete_btn = QtWidgets.QPushButton("Delete")
         delete_btn.clicked.connect(lambda: self.delete_hdri(record[0], record[1]))
         layout.addWidget(delete_btn)
-
         widget.setLayout(layout)
         return widget
 
     def update_hdri_info(self, record):
         dialog = HDRIInfoDialog(record, self)
         if dialog.exec_() == QtWidgets.QDialog.Accepted:
-            new_name = dialog.name_edit.text().strip()
-            new_cat_outdoor = 1 if dialog.outdoor_checkbox.isChecked() else 0
-            new_cat_indoor = 1 if dialog.indoor_checkbox.isChecked() else 0
-            new_cat_studio = 1 if dialog.studio_checkbox.isChecked() else 0
-            new_cat_nature = 1 if dialog.nature_checkbox.isChecked() else 0
-            new_cat_urban = 1 if dialog.urban_checkbox.isChecked() else 0
-            new_cat_sunset = 1 if dialog.sunset_checkbox.isChecked() else 0
-            new_cat_night = 1 if dialog.night_checkbox.isChecked() else 0
-            new_cat_day = 1 if dialog.day_checkbox.isChecked() else 0
-            new_cat_dawn = 1 if dialog.dawn_checkbox.isChecked() else 0
-
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE hdri 
-                SET name = ?, 
-                    cat_Outdoor = ?,
-                    cat_Indoor = ?,
-                    cat_Studio = ?,
-                    cat_Nature = ?,
-                    cat_Urban = ?,
-                    cat_Sunset = ?,
-                    cat_Night = ?,
-                    cat_Day = ?,
-                    cat_Dawn = ?
-                WHERE id = ?
-                """,
-                (
-                    new_name,
-                    new_cat_outdoor,
-                    new_cat_indoor,
-                    new_cat_studio,
-                    new_cat_nature,
-                    new_cat_urban,
-                    new_cat_sunset,
-                    new_cat_night,
-                    new_cat_day,
-                    new_cat_dawn,
-                    record[0],
-                ),
-            )
-            conn.commit()
-            conn.close()
             self.load_hdri_images()
+            self.populate_filter_checkboxes()
 
     def generate_preview(self, input_path, output_path):
         brightness_factor = 2.0
@@ -413,9 +427,7 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
                 input_image.close()
                 if image_data is None:
                     raise ValueError("Failed to read image data.")
-                image = np.array(image_data).reshape(
-                    spec.height, spec.width, spec.nchannels
-                )
+                image = np.array(image_data).reshape(spec.height, spec.width, spec.nchannels)
                 if spec.nchannels > 3:
                     image = image[:, :, :3]
                 image = image * brightness_factor
@@ -432,67 +444,45 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
 
     def add_hdri(self):
         file_dialog = QtWidgets.QFileDialog()
-        file_path, _ = file_dialog.getOpenFileName(
-            self,
-            "Select HDRI",
-            "",
-            "HDRI Files (*.hdr *.exr *.png *.jpg)"
-        )
+        file_path, _ = file_dialog.getOpenFileName(self, "Select HDRI", "", "HDRI Files (*.hdr *.exr *.png *.jpg)")
         if file_path:
             file_name = os.path.splitext(os.path.basename(file_path))[0]
-            # For new HDRI, we start with default category values (all 0)
-            hdri_name, ok = QtWidgets.QInputDialog.getText(
-                self, "Enter HDRI Name", "Name:", text=file_name
-            )
+            hdri_name, ok = QtWidgets.QInputDialog.getText(self, "Enter HDRI Name", "Name:", text=file_name)
             if not ok or not hdri_name:
                 return
-
-            # Record the current date/time in ISO format
             current_date = datetime.datetime.now().isoformat()
-
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             cursor.execute(
-                """
-                INSERT INTO hdri (file_path, preview_path, name, upload_date, 
-                                  cat_Outdoor, cat_Indoor, cat_Studio, cat_Nature, 
-                                  cat_Urban, cat_Sunset, cat_Night, cat_Day, cat_Dawn)
-                VALUES (?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-                """,
+                "INSERT INTO hdri (file_path, preview_path, name, upload_date) VALUES (?, ?, ?, ?)",
                 ("", "", hdri_name, current_date),
             )
             conn.commit()
             cursor.execute("SELECT last_insert_rowid()")
             hdri_id = cursor.fetchone()[0]
             conn.close()
-
             folder_name = f"{hdri_id:05d}_{hdri_name}"
             hdri_folder = os.path.join(HDRI_STORAGE_FOLDER, folder_name)
             os.makedirs(hdri_folder, exist_ok=True)
-
             new_file_path = os.path.join(hdri_folder, os.path.basename(file_path))
             shutil.copy(file_path, new_file_path)
-
             preview_path = os.path.join(hdri_folder, "preview.jpg")
             self.generate_preview(new_file_path, preview_path)
-
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE hdri SET file_path = ?, preview_path = ? WHERE id = ?",
-                (new_file_path, preview_path, hdri_id),
-            )
+            cursor.execute("UPDATE hdri SET file_path = ?, preview_path = ? WHERE id = ?",
+                           (new_file_path, preview_path, hdri_id))
             conn.commit()
             conn.close()
-
             self.load_hdri_images()
+            self.populate_filter_checkboxes()
 
     def delete_hdri(self, hdri_id, hdri_path):
         reply = QtWidgets.QMessageBox.question(
             self,
             "Delete HDRI",
             "Are you sure you want to delete this HDRI?",
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
         )
         if reply == QtWidgets.QMessageBox.Yes:
             try:
@@ -505,41 +495,32 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
                 conn.commit()
                 conn.close()
                 self.load_hdri_images()
+                self.populate_filter_checkboxes()
             except Exception as e:
-                QtWidgets.QMessageBox.warning(
-                    self, "Error", f"Error deleting HDRI: {e}"
-                )
+                QtWidgets.QMessageBox.warning(self, "Error", f"Error deleting HDRI: {e}")
 
     def apply_hdri(self, hdri_path):
         try:
-            # First, check if a node is selected
             selected_nodes = hou.selectedNodes()
             if selected_nodes:
                 node = selected_nodes[0]
                 found_parm = None
-                # Iterate through all parameters and look for a matching parameter name
                 for parm in node.parms():
-                    pname = parm.name().lower()
-                    if pname in ["file", "filename", "env_map"]:
+                    if parm.name().lower() in ["file", "filename", "env_map"]:
                         found_parm = parm
                         break
                 if found_parm:
                     found_parm.set(hdri_path)
-                    print(
-                        f"HDRI applied to selected node '{node.path()}': {hdri_path}"
-                    )
+                    print(f"HDRI applied to selected node '{node.path()}': {hdri_path}")
                     self.close()
                     return
                 else:
-                    print(f"Selected node '{node.path()}' has no parameter named file, filename, or env_map.")
-
-            # Fallback: use /obj environment light
+                    print(f"Selected node '{node.path()}' has no matching parameter.")
             obj = hou.node("/obj")
             light_name = "hdri_env_light"
             env_light = obj.node(light_name)
             if env_light is None:
                 env_light = obj.createNode("envlight", light_name)
-            # Try to set one of the common parameter names
             parm_set = False
             for param_name in ["env_map", "file", "filename"]:
                 parm = env_light.parm(param_name)
@@ -555,11 +536,9 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         except Exception as e:
             print(f"Error applying HDRI: {e}")
 
-
 def launch_hdri_loader():
     global hdr_loader
     hdr_loader = HDRIPreviewLoader()
     hdr_loader.show()
-
 
 launch_hdri_loader()
