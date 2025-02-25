@@ -507,10 +507,7 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
                     self.close()
                     return
                 else:
-                    print(
-                        f"Selected node '{node.path()}' has no parameter named file, "
-                        "filename, or env_map."
-                    )
+                    print(f"Selected node '{node.path()}' has no parameter named file, filename, or env_map.")
 
             # Fallback: use /obj environment light
             obj = hou.node("/obj")
