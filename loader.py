@@ -435,13 +435,43 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
 
     def apply_hdri(self, hdri_path):
         try:
+            # First, check if a node is selected
+            selected_nodes = hou.selectedNodes()
+            if selected_nodes:
+                node = selected_nodes[0]
+                found_parm = None
+                # Iterate through all parameters and look for a matching parameter name
+                for parm in node.parms():
+                    pname = parm.name().lower()
+                    if pname in ["file", "filename", "env_map"]:
+                        found_parm = parm
+                        break
+                if found_parm:
+                    found_parm.set(hdri_path)
+                    print(f"HDRI applied to selected node '{node.path()}': {hdri_path}")
+                    self.close()
+                    return
+                else:
+                    print(f"Selected node '{node.path()}' has no parameter named file, filename, or env_map.")
+            
+            # Fallback: use /obj environment light
             obj = hou.node("/obj")
             light_name = "hdri_env_light"
             env_light = obj.node(light_name)
             if env_light is None:
                 env_light = obj.createNode("envlight", light_name)
-            env_light.parm("env_map").set(hdri_path)
-            print(f"HDRI applied: {hdri_path}")
+            # Try to set one of the common parameter names
+            parm_set = False
+            for param_name in ["env_map", "file", "filename"]:
+                parm = env_light.parm(param_name)
+                if parm is not None:
+                    parm.set(hdri_path)
+                    parm_set = True
+                    break
+            if parm_set:
+                print(f"HDRI applied on environment light: {hdri_path}")
+            else:
+                print("No matching parameter found on environment light.")
             self.close()
         except Exception as e:
             print(f"Error applying HDRI: {e}")
