@@ -531,6 +531,8 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
                 if found_parm:
                     found_parm.set(hdri_path)
                     print(f"HDRI applied to selected node '{node.path()}': {hdri_path}")
+                    # Copy HDRI path to the clipboard.
+                    QtWidgets.QApplication.clipboard().setText(hdri_path)
                     self.close()
                     return
                 else:
@@ -551,9 +553,12 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
                 print(f"HDRI applied on environment light: {hdri_path}")
             else:
                 print("No matching parameter found on environment light.")
+            # Copy HDRI path to the clipboard.
+            QtWidgets.QApplication.clipboard().setText(hdri_path)
             self.close()
         except Exception as e:
             print(f"Error applying HDRI: {e}")
+
 
 def launch_hdri_loader():
     global hdr_loader
