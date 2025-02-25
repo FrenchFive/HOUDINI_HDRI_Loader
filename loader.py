@@ -1,13 +1,13 @@
 import os
 import shutil
 import sqlite3
+import datetime
 
 import hou
 import OpenImageIO as oiio
 import numpy as np
 from PySide2 import QtWidgets, QtGui, QtCore
 from PIL import Image
-
 
 # Check if path.txt exists
 if not os.path.exists("path.txt"):
@@ -38,6 +38,7 @@ def initialize_database():
             file_path TEXT NOT NULL,
             preview_path TEXT NOT NULL,
             name TEXT NOT NULL,
+            upload_date TEXT NOT NULL,
             cat_Outdoor BOOLEAN DEFAULT 0,
             cat_Indoor BOOLEAN DEFAULT 0,
             cat_Studio BOOLEAN DEFAULT 0,
@@ -119,9 +120,9 @@ class HDRIInfoDialog(QtWidgets.QDialog):
     def __init__(self, record, parent=None):
         """
         Record indices:
-          0: id, 1: file_path, 2: preview_path, 3: name,
-          4: cat_Outdoor, 5: cat_Indoor, 6: cat_Studio, 7: cat_Nature,
-          8: cat_Urban, 9: cat_Sunset, 10: cat_Night, 11: cat_Day, 12: cat_Dawn
+          0: id, 1: file_path, 2: preview_path, 3: name, 4: upload_date,
+          5: cat_Outdoor, 6: cat_Indoor, 7: cat_Studio, 8: cat_Nature,
+          9: cat_Urban, 10: cat_Sunset, 11: cat_Night, 12: cat_Day, 13: cat_Dawn
         """
         super().__init__(parent)
         self.setWindowTitle("Update HDRI Info")
@@ -131,39 +132,39 @@ class HDRIInfoDialog(QtWidgets.QDialog):
         layout.addRow("Name:", self.name_edit)
 
         self.outdoor_checkbox = QtWidgets.QCheckBox("Outdoor")
-        self.outdoor_checkbox.setChecked(bool(record[4]))
+        self.outdoor_checkbox.setChecked(bool(record[5]))
         layout.addRow(self.outdoor_checkbox)
 
         self.indoor_checkbox = QtWidgets.QCheckBox("Indoor")
-        self.indoor_checkbox.setChecked(bool(record[5]))
+        self.indoor_checkbox.setChecked(bool(record[6]))
         layout.addRow(self.indoor_checkbox)
 
         self.studio_checkbox = QtWidgets.QCheckBox("Studio")
-        self.studio_checkbox.setChecked(bool(record[6]))
+        self.studio_checkbox.setChecked(bool(record[7]))
         layout.addRow(self.studio_checkbox)
 
         self.nature_checkbox = QtWidgets.QCheckBox("Nature")
-        self.nature_checkbox.setChecked(bool(record[7]))
+        self.nature_checkbox.setChecked(bool(record[8]))
         layout.addRow(self.nature_checkbox)
 
         self.urban_checkbox = QtWidgets.QCheckBox("Urban")
-        self.urban_checkbox.setChecked(bool(record[8]))
+        self.urban_checkbox.setChecked(bool(record[9]))
         layout.addRow(self.urban_checkbox)
 
         self.sunset_checkbox = QtWidgets.QCheckBox("Sunset")
-        self.sunset_checkbox.setChecked(bool(record[9]))
+        self.sunset_checkbox.setChecked(bool(record[10]))
         layout.addRow(self.sunset_checkbox)
 
         self.night_checkbox = QtWidgets.QCheckBox("Night")
-        self.night_checkbox.setChecked(bool(record[10]))
+        self.night_checkbox.setChecked(bool(record[11]))
         layout.addRow(self.night_checkbox)
 
         self.day_checkbox = QtWidgets.QCheckBox("Day")
-        self.day_checkbox.setChecked(bool(record[11]))
+        self.day_checkbox.setChecked(bool(record[12]))
         layout.addRow(self.day_checkbox)
 
         self.dawn_checkbox = QtWidgets.QCheckBox("Dawn")
-        self.dawn_checkbox.setChecked(bool(record[12]))
+        self.dawn_checkbox.setChecked(bool(record[13]))
         layout.addRow(self.dawn_checkbox)
 
         self.button_box = QtWidgets.QDialogButtonBox(
@@ -196,6 +197,18 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         self.filter_button.setCheckable(True)
         self.filter_button.toggled.connect(self.toggle_filters)
         self.search_layout.addWidget(self.filter_button)
+
+        # Sorting dropdown for ordering results
+        self.sort_combo = QtWidgets.QComboBox()
+        self.sort_combo.addItems([
+            "Alphabetical Ascending",
+            "Alphabetical Descending",
+            "Upload Date Ascending",
+            "Upload Date Descending"
+        ])
+        self.sort_combo.currentIndexChanged.connect(self.search_hdri)
+        self.search_layout.addWidget(self.sort_combo)
+
         self.layout.addLayout(self.search_layout)
 
         # -- Filter Widget (initially hidden) --
@@ -248,7 +261,7 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         cursor = conn.cursor()
         base_query = (
             """
-            SELECT id, file_path, preview_path, name,
+            SELECT id, file_path, preview_path, name, upload_date,
                    cat_Outdoor, cat_Indoor, cat_Studio, cat_Nature,
                    cat_Urban, cat_Sunset, cat_Night, cat_Day, cat_Dawn
             FROM hdri
@@ -274,6 +287,14 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         else:
             query = base_query
 
+        # Append ORDER BY clause based on the sort dropdown selection
+        sort_option = self.sort_combo.currentText() if hasattr(self, 'sort_combo') else "Alphabetical Ascending"
+        if sort_option.startswith("Alphabetical"):
+            query += " ORDER BY name "
+        elif sort_option.startswith("Upload Date"):
+            query += " ORDER BY upload_date "
+        query += "DESC" if "Descending" in sort_option else "ASC"
+
         cursor.execute(query, params)
         records = cursor.fetchall()
         conn.close()
@@ -295,7 +316,7 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
 
     def create_thumbnail_widget(self, record):
         # Record indices:
-        # 0: id, 1: file_path, 2: preview_path, 3: name, 4-12: category flags
+        # 0: id, 1: file_path, 2: preview_path, 3: name, 4: upload_date, 5-13: category flags
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout()
 
@@ -310,8 +331,8 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         btn.clicked.connect(lambda: self.apply_hdri(record[1]))
         layout.addWidget(btn)
 
-        # Label displaying the HDRI name
-        label = QtWidgets.QLabel(record[3])
+        # Label displaying the HDRI name and upload date
+        label = QtWidgets.QLabel(f"{record[3]}\n({record[4][:10]})")
         label.setAlignment(QtCore.Qt.AlignCenter)
         layout.addWidget(label)
 
@@ -426,16 +447,19 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
             if not ok or not hdri_name:
                 return
 
+            # Record the current date/time in ISO format
+            current_date = datetime.datetime.now().isoformat()
+
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO hdri (file_path, preview_path, name, 
+                INSERT INTO hdri (file_path, preview_path, name, upload_date, 
                                   cat_Outdoor, cat_Indoor, cat_Studio, cat_Nature, 
                                   cat_Urban, cat_Sunset, cat_Night, cat_Day, cat_Dawn)
-                VALUES (?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+                VALUES (?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 0, 0)
                 """,
-                ("", "", hdri_name),
+                ("", "", hdri_name, current_date),
             )
             conn.commit()
             cursor.execute("SELECT last_insert_rowid()")
