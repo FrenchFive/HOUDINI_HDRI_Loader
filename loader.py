@@ -11,6 +11,159 @@ import numpy as np
 from PySide2 import QtWidgets, QtGui, QtCore
 from PIL import Image
 
+# -----------------------------
+# Self-contained pHash code
+# -----------------------------
+
+# Use high-quality downsampling.
+ANTIALIAS = Image.LANCZOS
+
+def _binary_array_to_hex(arr):
+    """
+    Convert a binary (boolean) numpy array into a hex string.
+    """
+    bit_string = ''.join(str(int(b)) for b in arr.flatten())
+    width = int(np.ceil(len(bit_string) / 4))
+    return '{:0>{width}x}'.format(int(bit_string, 2), width=width)
+
+class ImageHash:
+    """
+    Encapsulates an image hash (stored as a boolean numpy array).
+    Supports string conversion, equality, and Hamming distance comparisons.
+    """
+    def __init__(self, binary_array):
+        self.hash = binary_array
+
+    def __str__(self):
+        return _binary_array_to_hex(self.hash)
+
+    def __repr__(self):
+        return repr(self.hash)
+
+    def __sub__(self, other):
+        if other is None:
+            raise TypeError("Other hash must not be None.")
+        if self.hash.size != other.hash.size:
+            raise TypeError("ImageHashes must be of the same size.")
+        return np.count_nonzero(self.hash.flatten() != other.hash.flatten())
+
+    def __eq__(self, other):
+        if other is None:
+            return False
+        return np.array_equal(self.hash.flatten(), other.hash.flatten())
+
+def dct_1d(vector):
+    """
+    Compute a 1D Discrete Cosine Transform (DCT-II) of a 1D numpy array.
+    """
+    N = len(vector)
+    result = np.zeros(N, dtype=np.float64)
+    for k in range(N):
+        s = 0.0
+        for n in range(N):
+            s += vector[n] * np.cos(np.pi * (n + 0.5) * k / N)
+        if k == 0:
+            result[k] = s * np.sqrt(1.0 / N)
+        else:
+            result[k] = s * np.sqrt(2.0 / N)
+    return result
+
+def dct_2d(matrix):
+    """
+    Compute a 2D DCT-II on a 2D numpy array.
+    """
+    M, N = matrix.shape
+    # Apply 1D DCT to rows.
+    dct_rows = np.empty((M, N), dtype=np.float64)
+    for i in range(M):
+        dct_rows[i, :] = dct_1d(matrix[i, :])
+    # Apply 1D DCT to columns.
+    dct_cols = np.empty((M, N), dtype=np.float64)
+    for j in range(N):
+        dct_cols[:, j] = dct_1d(dct_rows[:, j])
+    return dct_cols
+
+def phash(image, hash_size=8, img_size=32):
+    """
+    Compute the perceptual hash (pHash) for a PIL Image.
+    
+    Steps:
+      1. Convert image to grayscale and resize to (img_size x img_size).
+      2. Compute the 2D DCT of the image.
+      3. Keep only the top-left (hash_size x hash_size) DCT coefficients.
+      4. Compute the mean of these coefficients (excluding the DC term at [0,0]).
+      5. Generate a binary hash: each bit is 1 if the coefficient is above the mean, else 0.
+         The DC coefficient is forced to 0.
+    """
+    # 1. Reduce size and convert to grayscale.
+    image = image.convert('L').resize((img_size, img_size), ANTIALIAS)
+    pixels = np.asarray(image, dtype=np.float64)
+    
+    # 2. Compute the 2D DCT.
+    dct = dct_2d(pixels)
+    
+    # 3. Keep top-left hash_size x hash_size block.
+    dct_low = dct[:hash_size, :hash_size]
+    
+    # 4. Compute the mean of the DCT coefficients, excluding the DC coefficient.
+    dct_flat = dct_low.flatten()
+    dct_without_dc = dct_flat[1:]
+    avg = np.mean(dct_without_dc)
+    
+    # 5. Create the hash: for each coefficient, set bit=1 if > avg.
+    diff = dct_low > avg
+    diff[0, 0] = 0  # Force the DC coefficient to 0.
+    
+    return ImageHash(diff)
+
+def compute_image_hash(file_path, hash_size=8, img_size=32):
+    """
+    Compute the perceptual hash (pHash) for an image.
+    For HDR/EXR files, OpenImageIO is used to read the image data and convert it to a PIL Image.
+    For other image types, PIL is used directly.
+    The resulting hash is computed using the pHash function.
+    """
+    try:
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in [".exr", ".hdr"]:
+            # Use OpenImageIO to read HDR/EXR file.
+            input_image = oiio.ImageInput.open(file_path)
+            if not input_image:
+                raise ValueError(f"Could not open {file_path}")
+            spec = input_image.spec()
+            image_data = input_image.read_image("float")
+            input_image.close()
+            if image_data is None:
+                raise ValueError("Failed to read image data.")
+            image = np.array(image_data).reshape(spec.height, spec.width, spec.nchannels)
+            # Use first 3 channels for RGB; if only one channel exists, duplicate it.
+            if spec.nchannels >= 3:
+                image = image[:, :, :3]
+            else:
+                image = np.repeat(image[:, :, 0:1], 3, axis=2)
+            # Normalize to 0-255 and convert to uint8.
+            max_val = np.max(image)
+            if max_val > 0:
+                image = image / max_val * 255
+            else:
+                image = np.zeros_like(image)
+            image = image.astype(np.uint8)
+            pil_image = Image.fromarray(image, mode="RGB")
+        else:
+            # Open image using PIL directly.
+            pil_image = Image.open(file_path).convert("RGB")
+        
+        # Compute the perceptual hash using pHash.
+        hash_obj = phash(pil_image, hash_size=hash_size, img_size=img_size)
+        return str(hash_obj)
+    except Exception as e:
+        print(f"Error computing image hash: {e}")
+        return None
+
+# -----------------------------
+# End pHash code
+# -----------------------------
+
 # Check if path.txt exists; if not, prompt the user to select a folder.
 if not os.path.exists("path.txt"):
     folder_dialog = QtWidgets.QFileDialog()
@@ -28,60 +181,9 @@ else:
 print(HDRI_STORAGE_FOLDER)
 DB_PATH = os.path.join(HDRI_STORAGE_FOLDER, "hdri_database.db")
 
-def compute_image_hash(file_path, hash_size=16):
-    """
-    Compute a perceptual hash (average hash) that is invariant to image size.
-    For regular image files PIL is used.
-    For HDR/EXR files, OpenImageIO is used to read the image data and convert
-    it to an 8-bit grayscale image.
-    """
-    try:
-        ext = os.path.splitext(file_path)[1].lower()
-        if ext in [".exr", ".hdr"]:
-            # Use OpenImageIO to read HDR/EXR file
-            input_image = oiio.ImageInput.open(file_path)
-            if not input_image:
-                raise ValueError(f"Could not open {file_path}")
-            spec = input_image.spec()
-            image_data = input_image.read_image("float")
-            input_image.close()
-            if image_data is None:
-                raise ValueError("Failed to read image data.")
-            # Reshape and convert to numpy array
-            image = np.array(image_data).reshape(spec.height, spec.width, spec.nchannels)
-            # Convert to grayscale: if at least 3 channels exist use luminance coefficients
-            if spec.nchannels >= 3:
-                gray = 0.299 * image[..., 0] + 0.587 * image[..., 1] + 0.114 * image[..., 2]
-            else:
-                gray = image[..., 0]
-            # Normalize the grayscale image to the 0-255 range
-            max_val = np.max(gray)
-            if max_val > 0:
-                gray = gray / max_val * 255
-            else:
-                gray = np.zeros_like(gray)
-            gray = gray.astype(np.uint8)
-            pil_image = Image.fromarray(gray, mode="L")
-            img = pil_image
-        else:
-            # For other image types, use PIL directly.
-            img = Image.open(file_path).convert("L")
-        # Resize the image to a fixed size (16x16 by default)
-        img = img.resize((hash_size, hash_size), Image.LANCZOS)
-        pixels = list(img.getdata())
-        avg = sum(pixels) / len(pixels)
-        bits = ''.join('1' if pixel >= avg else '0' for pixel in pixels)
-        hex_hash = hex(int(bits, 2))[2:].rjust((hash_size * hash_size) // 4, '0')
-        return hex_hash
-    except Exception as e:
-        print(f"Error computing image hash: {e}")
-        return None
-
-
 def initialize_database():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # Create the hdri table with fixed columns and a unique hash column.
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS hdri (
@@ -98,34 +200,23 @@ def initialize_database():
     conn.close()
 
 def get_tag_columns():
-    """Return a list of tag column names in the hdri table (columns starting with 'tag_')."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("PRAGMA table_info(hdri)")
-    cols = cursor.fetchall()  # each row: (cid, name, type, notnull, dflt_value, pk)
+    cols = cursor.fetchall()
     conn.close()
     tag_cols = [col[1] for col in cols if col[1].startswith("tag_")]
     return tag_cols
 
 def safe_tag_column(tag_name):
-    """Create a safe column name for a tag by stripping spaces and prepending 'tag_'."""
     return "tag_" + tag_name.strip().replace(" ", "_")
 
 def drop_column_from_table(db_path, table, column_to_drop):
-    """
-    Workaround to drop a column in SQLite:
-      1. Create a temporary table with all columns except the one to drop.
-      2. Copy data.
-      3. Drop the old table.
-      4. Rename the new table.
-    """
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     cursor.execute(f"PRAGMA table_info({table})")
-    columns_info = cursor.fetchall()  # (cid, name, type, notnull, dflt_value, pk)
-    # Keep all columns except the one to drop.
+    columns_info = cursor.fetchall()
     new_columns = [col for col in columns_info if col[1] != column_to_drop]
-    # Build new CREATE TABLE statement.
     col_defs = []
     for col in new_columns:
         name = col[1]
@@ -209,26 +300,20 @@ class QWrapLayout(QtWidgets.QLayout):
 
 class HDRIInfoDialog(QtWidgets.QDialog):
     def __init__(self, record, parent=None):
-        """
-        record indices:
-          0: id, 1: file_path, 2: preview_path, 3: name, 4: upload_date
-        """
         super().__init__(parent)
         self.setWindowTitle("Update HDRI Info")
         self.hdri_id = record[0]
-        self.tag_checkboxes = {}  # Mapping from tag column name to QCheckBox
+        self.tag_checkboxes = {}
         layout = QtWidgets.QFormLayout(self)
 
         self.name_edit = QtWidgets.QLineEdit(record[3])
         layout.addRow("Name:", self.name_edit)
 
-        # --- Tag editing section ---
         self.tags_widget = QtWidgets.QWidget()
         self.tags_layout = QtWidgets.QVBoxLayout(self.tags_widget)
-        self.load_tags()  # Populate self.tags_layout with checkboxes and delete buttons
+        self.load_tags()
         layout.addRow("Tags:", self.tags_widget)
 
-        # Input and button to add a new tag
         tag_input_layout = QtWidgets.QHBoxLayout()
         self.new_tag_edit = QtWidgets.QLineEdit()
         self.new_tag_edit.setPlaceholderText("Enter new tag")
@@ -238,7 +323,6 @@ class HDRIInfoDialog(QtWidgets.QDialog):
         tag_input_layout.addWidget(self.add_tag_button)
         layout.addRow("New Tag:", tag_input_layout)
 
-        # --- Dialog buttons ---
         self.button_box = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
         )
@@ -247,7 +331,6 @@ class HDRIInfoDialog(QtWidgets.QDialog):
         layout.addRow(self.button_box)
 
     def load_tags(self):
-        """Clear and repopulate the tags section with checkboxes for each tag column."""
         for i in reversed(range(self.tags_layout.count())):
             item = self.tags_layout.takeAt(i)
             if item.widget():
@@ -260,15 +343,13 @@ class HDRIInfoDialog(QtWidgets.QDialog):
             cursor.execute(f"SELECT {col} FROM hdri WHERE id = ?", (self.hdri_id,))
             value = cursor.fetchone()[0]
             hlayout = QtWidgets.QHBoxLayout()
-            display_name = col[4:]  # remove the "tag_" prefix for display
+            display_name = col[4:]
             checkbox = QtWidgets.QCheckBox(display_name)
             checkbox.setChecked(bool(value))
             self.tag_checkboxes[col] = checkbox
             hlayout.addWidget(checkbox)
-            # X button to delete the tag without confirmation
             del_btn = QtWidgets.QPushButton("X")
             del_btn.setFixedSize(20, 20)
-            # Use functools.partial to capture the current value of col
             del_btn.clicked.connect(partial(self.delete_tag, col))
             hlayout.addWidget(del_btn)
             container = QtWidgets.QWidget()
@@ -300,7 +381,6 @@ class HDRIInfoDialog(QtWidgets.QDialog):
             parent.populate_filter_checkboxes()
 
     def delete_tag(self, col_name):
-        # Immediately drop the column without confirmation or warning.
         try:
             drop_column_from_table(DB_PATH, "hdri", col_name)
         except Exception as e:
@@ -333,7 +413,6 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         self.layout = QtWidgets.QVBoxLayout()
         self.setLayout(self.layout)
 
-        # -- Search and Filter Bar Section --
         self.search_layout = QtWidgets.QHBoxLayout()
         self.search_bar = QtWidgets.QLineEdit()
         self.search_bar.setPlaceholderText("Search HDRI...")
@@ -354,7 +433,6 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         self.search_layout.addWidget(self.sort_combo)
         self.layout.addLayout(self.search_layout)
 
-        # -- Filter Widget (initially hidden) --
         self.filter_widget = QtWidgets.QWidget()
         self.filter_layout = QtWidgets.QHBoxLayout(self.filter_widget)
         self.filter_checkboxes = {}
@@ -362,12 +440,10 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         self.filter_widget.setVisible(False)
         self.layout.addWidget(self.filter_widget)
 
-        # -- Add HDRI Button --
         self.add_button = QtWidgets.QPushButton("Add HDRI")
         self.add_button.clicked.connect(self.add_hdri)
         self.layout.addWidget(self.add_button)
 
-        # -- Scrollable Grid Section --
         self.scroll_area = QtWidgets.QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_widget = QtWidgets.QWidget()
@@ -436,8 +512,6 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
     def create_thumbnail_widget(self, record):
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout()
-        
-        # Create the HDRI preview button.
         btn = QtWidgets.QPushButton()
         btn.setFixedSize(150, 150)
         pixmap = QtGui.QPixmap(record[2])
@@ -448,30 +522,19 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
         btn.setIconSize(QtCore.QSize(150, 150))
         btn.clicked.connect(lambda: self.apply_hdri(record[1]))
         layout.addWidget(btn)
-        
-        # Create a horizontal layout for the HDRI name and the options button.
         name_layout = QtWidgets.QHBoxLayout()
-        
-        # Display only the HDRI name.
         name_label = QtWidgets.QLabel(record[3])
         name_layout.addWidget(name_label)
-        
-        # Create a three-dotted button using QToolButton.
         options_button = QtWidgets.QToolButton()
         options_button.setText("...")
         options_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
-        
-        # Create a menu with "Update" and "Delete" actions.
         menu = QtWidgets.QMenu(options_button)
         update_action = menu.addAction("Update")
         delete_action = menu.addAction("Delete")
-        
         update_action.triggered.connect(lambda: self.update_hdri_info(record))
         delete_action.triggered.connect(lambda: self.delete_hdri(record[0], record[1]))
-        
         options_button.setMenu(menu)
         name_layout.addWidget(options_button)
-        
         layout.addLayout(name_layout)
         widget.setLayout(layout)
         return widget
@@ -514,47 +577,47 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
 
     def add_hdri(self):
         file_dialog = QtWidgets.QFileDialog()
-        file_path, _ = file_dialog.getOpenFileName(self, "Select HDRI", "", "HDRI Files (*.hdr *.exr *.png *.jpg)")
-        if file_path:
-            # Compute the perceptual hash for a 16x16 image.
-            image_hash = compute_image_hash(file_path, hash_size=16)
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            cursor.execute("SELECT id FROM hdri WHERE hash = ?", (image_hash,))
-            result = cursor.fetchone()
-            if result:
-                QtWidgets.QMessageBox.warning(self, "Duplicate HDRI", "This image already exists in the database.")
-                conn.close()
-                return
+        file_paths, _ = file_dialog.getOpenFileNames(self, "Select HDRI(s)", "", "HDRI Files (*.hdr *.exr *.png *.jpg)")
+        if file_paths:
+            for file_path in file_paths:
+                # Compute perceptual hash using the pHash implementation.
+                image_hash = compute_image_hash(file_path, hash_size=8, img_size=32)
+                if image_hash is None:
+                    print(f"Skipping {file_path} due to hash error.")
+                    continue
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute("SELECT id FROM hdri WHERE hash = ?", (image_hash,))
+                result = cursor.fetchone()
+                if result:
+                    QtWidgets.QMessageBox.warning(self, "Duplicate HDRI", f"Image {os.path.basename(file_path)} already exists in the database.")
+                    conn.close()
+                    continue
 
-            file_name = os.path.splitext(os.path.basename(file_path))[0]
-            hdri_name, ok = QtWidgets.QInputDialog.getText(self, "Enter HDRI Name", "Name:", text=file_name)
-            if not ok or not hdri_name:
+                hdri_name = os.path.splitext(os.path.basename(file_path))[0]
+                current_date = datetime.datetime.now().isoformat()
+                cursor.execute(
+                    "INSERT INTO hdri (file_path, preview_path, name, upload_date, hash) VALUES (?, ?, ?, ?, ?)",
+                    ("", "", hdri_name, current_date, image_hash),
+                )
+                conn.commit()
+                cursor.execute("SELECT last_insert_rowid()")
+                hdri_id = cursor.fetchone()[0]
                 conn.close()
-                return
-            current_date = datetime.datetime.now().isoformat()
-            cursor.execute(
-                "INSERT INTO hdri (file_path, preview_path, name, upload_date, hash) VALUES (?, ?, ?, ?, ?)",
-                ("", "", hdri_name, current_date, image_hash),
-            )
-            conn.commit()
-            cursor.execute("SELECT last_insert_rowid()")
-            hdri_id = cursor.fetchone()[0]
-            conn.close()
 
-            folder_name = f"{hdri_id:05d}_{hdri_name}"
-            hdri_folder = os.path.join(HDRI_STORAGE_FOLDER, folder_name)
-            os.makedirs(hdri_folder, exist_ok=True)
-            new_file_path = os.path.join(hdri_folder, os.path.basename(file_path))
-            shutil.copy(file_path, new_file_path)
-            preview_path = os.path.join(hdri_folder, "preview.jpg")
-            self.generate_preview(new_file_path, preview_path)
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            cursor.execute("UPDATE hdri SET file_path = ?, preview_path = ? WHERE id = ?",
-                           (new_file_path, preview_path, hdri_id))
-            conn.commit()
-            conn.close()
+                folder_name = f"{hdri_id:05d}_{hdri_name}"
+                hdri_folder = os.path.join(HDRI_STORAGE_FOLDER, folder_name)
+                os.makedirs(hdri_folder, exist_ok=True)
+                new_file_path = os.path.join(hdri_folder, os.path.basename(file_path))
+                shutil.copy(file_path, new_file_path)
+                preview_path = os.path.join(hdri_folder, "preview.jpg")
+                self.generate_preview(new_file_path, preview_path)
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute("UPDATE hdri SET file_path = ?, preview_path = ? WHERE id = ?",
+                               (new_file_path, preview_path, hdri_id))
+                conn.commit()
+                conn.close()
             self.load_hdri_images()
             self.populate_filter_checkboxes()
 
@@ -593,7 +656,6 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
                 if found_parm:
                     found_parm.set(hdri_path)
                     print(f"HDRI applied to selected node '{node.path()}': {hdri_path}")
-                    # Copy HDRI path to the clipboard.
                     QtWidgets.QApplication.clipboard().setText(hdri_path)
                     self.close()
                     return
@@ -615,7 +677,6 @@ class HDRIPreviewLoader(QtWidgets.QWidget):
                 print(f"HDRI applied on environment light: {hdri_path}")
             else:
                 print("No matching parameter found on environment light.")
-            # Copy HDRI path to the clipboard.
             QtWidgets.QApplication.clipboard().setText(hdri_path)
             self.close()
         except Exception as e:
