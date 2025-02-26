@@ -1,82 +1,121 @@
-# HDRI Loader for Houdini Sidefx
-A tool to load the HDRI automaticly 
+# HDRI Loader for Houdini SideFX 🚀🌌
 
-```python
-filepath = r"path/to/github/loader.py"
-with open(filepath, "r") as file:
-    exec(file.read())
-```
+HDRI Loader is a powerful and intuitive tool designed to manage, preview, and apply HDRI files directly within Houdini. It helps you efficiently organize your HDRI library, prevent duplicate imports with perceptual hashing (pHash), and seamlessly integrate HDRIs into your scenes.
+
 ---
 
-HDRI Preview Loader is a Python-based tool designed for managing, previewing, and applying HDRI files within Houdini. The application leverages a simple SQLite database to store metadata about HDRI files, including file paths, preview images, and various category tags. The intuitive graphical user interface (GUI) is built with PySide2, and the tool offers features such as search, filtering, and one-click HDRI application.
+## Features ✨
 
-## Features
+- **Easy HDRI Import**  
+  📂 Quickly add HDRIs using a file dialog and automatically generate high-quality preview thumbnails.
 
-- **Import HDRIs:** Easily add HDRI files using a file dialog and automatically generate preview thumbnails.
-- **Database Management:** Store HDRI metadata in an SQLite database with support for various predefined categories.
-- **Search & Filtering:** Search HDRIs by name and filter by predefined category tags (e.g., Outdoor, Indoor, Studio, etc.).
-- **Apply HDRI:** Automatically apply the selected HDRI to a Houdini node or create an environment light if none is selected.
-- **Preview Regeneration:** Generate a 200x200 JPEG preview for HDRI files, with support for HDR and EXR formats.
-- **Update and Delete:** Modify HDRI metadata and remove unwanted HDRIs from the database and file system.
-- **PEP 8 Compliant:** The code follows PEP 8 style guidelines for clean and maintainable code.
+- **Smart Database Management**  
+  💾 Store HDRI metadata (file paths, preview images, names, upload dates, and unique image hashes) in an SQLite database, preventing duplicate entries.
 
-## Requirements
+- **Search & Filtering**  
+  🔍 Search HDRIs by name and filter by customizable tags. Easily add, update, or delete tags for better organization.
+
+- **Seamless Houdini Integration**  
+  🎬 Apply the selected HDRI directly to a Houdini node, or create/update an environment light if no node is selected.
+
+- **Preview Generation**  
+  🖼️ Generate 200x200 JPEG previews with brightness and gamma adjustments. Supports HDR, EXR, and standard image formats.
+
+- **Code Guideline**  
+  🐍 Built using Python with adherence to PEP 8 guidelines for clarity and maintainability.
+
+---
+
+## Requirements 📋
 
 - **Python 3.x**
-- **Houdini** (for the `hou` module)
+- **Houdini** (SideFX) with Python environment
 - **PySide2** (for the GUI)
 - **OpenImageIO** (for HDR image processing)
-- **NumPy**
-- **Pillow (PIL)**
+- **NumPy** (for numerical computations)
+- **Pillow (PIL)** (for image manipulation)
 
-Houdini has all those modules pre-installed, so running the script through Houdini should be plug and play.
+> *Note:* Houdini usually comes with these modules pre-installed, so running the script from within Houdini should be seamless.
 
-## Installation
+---
+
+## Installation 🔧
 
 1. **Clone the Repository:**
 
    ```bash
-   git clone https://github.com/yourusername/hdri-preview-loader.git
-   cd hdri-preview-loader
+   git clone https://github.com/yourusername/hdri-loader-houdini.git
+   cd hdri-loader-houdini
    ```
 
-2. **Install Dependencies:**
+2. **Install Dependencies (if needed):**
 
-   You can install the required Python packages using `pip`:
+   If you're running the script outside Houdini's built-in Python environment, install the required packages:
 
    ```bash
-   pip install PySide2 numpy Pillow
+   pip install PySide2 numpy Pillow OpenImageIO
    ```
 
-   *Note:* As mentionned before Houdini should have all dependencies already installed as default
+   *Tip:* Houdini's Python environment often includes these dependencies by default.
 
-3. **Setup Houdini Environment:**
+---
 
-   Ensure that Houdini is installed and properly configured so that Python can import the `hou` module.
+## Usage 🚀
 
-## Usage
+1. **Launch Houdini:**
 
-1. **Run the Application:**
+   Open Houdini and run the following Python snippet in the Houdini Python shell:
 
-   Simply run the Python script from within Houdini's Python environment or from a terminal where Houdini's environment is configured:
-
-   ```bash
-   python hdri_preview_loader.py
+   ```python
+   filepath = r"path/to/hdri_loader.py"
+   with open(filepath, "r") as file:
+       exec(file.read())
    ```
 
-2. **Selecting HDRI Storage Folder:**
+2. **Select HDRI Storage Folder:**
 
-   - On first launch, you will be prompted to select a folder where HDRI files and the database will be stored.
+   - On the first run, you'll be prompted to choose a folder where HDRI files and the SQLite database will be stored.
    - This path is saved in a `path.txt` file for future sessions.
 
-3. **Managing HDRI Files:**
+3. **Manage Your HDRIs:**
 
-   - **Adding an HDRI:** Click the "Add HDRI" button, choose your file, and provide a name.
-   - **Updating Metadata:** Use the "Update" button on any HDRI thumbnail to modify its metadata.
-   - **Deleting an HDRI:** Remove unwanted HDRIs with the "Delete" button.
+   - **Add HDRI:** Click the "Add HDRI" button to import new HDRI files.
+   - **Update Metadata:** Use the "Update" option on any HDRI thumbnail to modify its name and tags.
+   - **Delete HDRI:** Remove unwanted HDRIs from both the database and the file system.
 
-4. **Applying HDRI:**
+4. **Apply HDRI:**
 
-   - Select a node in Houdini and click on an HDRI thumbnail to automatically apply the HDRI.
-   - If no node is selected, the application will create or update an environment light in `/obj`.
+   - Select a node in Houdini and click on an HDRI thumbnail to automatically apply it.
+   - If no node is selected, the tool creates or updates an environment light in `/obj`.
 
+---
+
+## Code Overview 📜
+
+- **pHash Implementation:**  
+  Computes a perceptual hash for each image to detect duplicates and ensure uniqueness.
+
+- **Database Management:**  
+  Utilizes SQLite to store and manage HDRI metadata, including custom tag columns.
+
+- **GUI Built with PySide2:**  
+  Provides an interactive interface for managing HDRI files with search, filtering, and preview capabilities.
+
+- **Preview Generation:**  
+  Generates optimized 200x200 JPEG previews with brightness and gamma corrections using PIL and OpenImageIO.
+
+---
+
+## Acknowledgements 🙏
+
+A huge thank you to these resources for their invaluable help:
+
+- [HackerFactor - Looks Like It](https://www.hackerfactor.com/blog/index.php?/archives/432-Looks-Like-It.html)  
+  Their insights and implementation details inspired the pHash algorithm.
+
+- [JohannesBuchner's imagehash on GitHub](https://github.com/JohannesBuchner/imagehash/tree/master)  
+  An amazing project that provided great examples and ideas for perceptual image hashing.
+
+---
+
+Enjoy managing your HDRIs and elevate your Houdini projects with ease! 😄🎥
