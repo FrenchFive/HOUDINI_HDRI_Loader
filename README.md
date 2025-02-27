@@ -24,9 +24,12 @@ HDRI Loader is a powerful and intuitive tool designed to manage, preview, and ap
 - **Code Guideline**  
   🐍 Built using Python with adherence to PEP 8 guidelines for clarity and maintainability.
 
+---
+
 <div align=center>
   <img src="https://github.com/user-attachments/assets/9eeb865a-f3a8-4e69-83b3-1d6232146fc7">
 </div>
+
 ---
 
 ## Requirements 📋
